@@ -2,37 +2,41 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import re
+import json
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+# Mobile user agent is successful for Tesco
+MOBILE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
 }
 
 def parse_units(title):
     if not title: return []
-    # Matches 500g, 1kg, 100ml, 1.5L, Pack of 6, 6 x 500ml etc.
-    # We want to normalize these
     title = title.lower()
     units = []
 
-    # 1. Look for "Pack of X" or "X pack"
+    # Pack size
     pack_match = re.search(r'pack of (\d+)', title) or re.search(r'(\d+)\s*pack', title)
-    if pack_match:
-        units.append(("pack", float(pack_match.group(1))))
+    pack_size = float(pack_match.group(1)) if pack_match else 1.0
+    units.append(("pack", pack_size))
 
-    # 2. Look for weight/volume
-    # (\d+(?:\.\d+)?)\s*(g|kg|ml|l)
+    # Washes (common in grocery/laundry)
+    wash_match = re.search(r'(\d+)\s*washes', title)
+    if wash_match:
+        units.append(("washes", float(wash_match.group(1))))
+
+    # Volume/Weight
     vol_matches = re.findall(r'(\d+(?:\.\d+)?)\s*(g|kg|ml|l)\b', title)
     for val, unit in vol_matches:
         val = float(val)
-        if unit == 'kg':
-            val *= 1000
-            unit = 'g'
-        elif unit == 'l':
-            val *= 1000
-            unit = 'ml'
+        if unit == 'kg': val *= 1000; unit = 'g'
+        elif unit == 'l': val *= 1000; unit = 'ml'
         units.append((unit, val))
+        if pack_size > 1:
+            units.append(("total_" + unit, val * pack_size))
 
-    # 3. Look for X x Yml
+    # Multiplier (e.g. 6 x 330ml)
     mult_matches = re.findall(r'(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(g|kg|ml|l)\b', title)
     for count, val, unit in mult_matches:
         count = float(count)
@@ -44,94 +48,97 @@ def parse_units(title):
     return units
 
 def units_match(units1, units2):
-    if not units1 or not units2: return True # If we can't find units, we assume they might match (optimistic)
+    if not units1 or not units2: return False
+    u1_dict = dict(units1)
+    u2_dict = dict(units2)
 
-    # If both have units, they MUST match at least one significant unit
-    for u1 in units1:
-        for u2 in units2:
-            if u1[0] == u2[0]:
-                if abs(u1[1] - u2[1]) > 0.01: # allow tiny float diff
-                    return False
+    matched_at_least_one_specific = False
+
+    # Compare common units
+    for key in ['washes', 'g', 'ml', 'total_g', 'total_ml']:
+        if key in u1_dict and key in u2_dict:
+            matched_at_least_one_specific = True
+            if abs(u1_dict[key] - u2_dict[key]) > 0.1:
+                return False
+        elif key in u1_dict or key in u2_dict:
+            # One side has a specific unit, the other doesn't.
+            # This is generally a mismatch, unless we're comparing a title that just missed the unit.
+            # But for safety, let's keep it strict.
+            return False
+
+    # If no specific units matched, check pack size
+    if not matched_at_least_one_specific:
+        if u1_dict.get('pack', 1.0) != u2_dict.get('pack', 1.0):
+            return False
+        return True # Both just have the same pack size and no other units
+
     return True
 
 def search_tesco(query):
-    # Tesco often blocks simple requests, using a cleaner search URL
-    print(f"Searching Tesco for: {query}")
-    query_clean = " ".join(query.split()[:5]) # keep it short
+    query_clean = " ".join(query.split()[:5])
     url = f"https://www.tesco.com/groceries/en-GB/search?query={requests.utils.quote(query_clean)}"
+    print(f"[Tesco] Searching: {url}")
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code != 200: return []
-        soup = BeautifulSoup(resp.text, "lxml")
+        resp = requests.get(url, headers=MOBILE_HEADERS, timeout=10)
+        if resp.status_code != 200:
+            print(f"[Tesco] Status: {resp.status_code}")
+            return []
+
         products = []
-        # Update selector based on current Tesco layout if possible
-        items = soup.select('.product-list--list-item')
-        for item in items:
-            title_tag = item.select_one('h3 a')
-            price_tag = item.select_one('.value')
-            if title_tag and price_tag:
-                title = title_tag.get_text(strip=True)
-                price = float(price_tag.get_text(strip=True).replace("£", ""))
-                products.append({
-                    "retailer": "Tesco",
-                    "title": title,
-                    "price": price,
-                    "url": "https://www.tesco.com" + title_tag['href'],
-                    "units": parse_units(title)
-                })
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Method 1: JSON blob (__NEXT_DATA__)
+        script = soup.find("script", id="__NEXT_DATA__")
+        if script:
+            try:
+                data = json.loads(script.string)
+                items = data.get("props", {}).get("pageProps", {}).get("initialState", {}).get("search", {}).get("results", {}).get("items", [])
+                for item in items:
+                    p = item.get("product", {})
+                    title = p.get("title")
+                    price = p.get("price", {}).get("actual") or p.get("unitPrice")
+                    if title and price:
+                        products.append({
+                            "retailer": "Tesco",
+                            "title": title,
+                            "price": float(price),
+                            "url": "https://www.tesco.com/groceries/en-GB/products/" + str(p.get("id", "")),
+                            "units": parse_units(title)
+                        })
+                if products: print(f"[Tesco] Found {len(products)} products via JSON")
+            except: pass
+
+        # Method 2: Regex fallback
+        if not products:
+            titles = re.findall(r'\"title\":\"([^\"]+)\"', resp.text)
+            prices = re.findall(r'\"unitPrice\":([0-9.]+)', resp.text)
+            if titles and prices:
+                for t, p in zip(titles, prices):
+                    if len(t) > 5 and not t.startswith("Sort and filter"):
+                        products.append({
+                            "retailer": "Tesco",
+                            "title": t,
+                            "price": float(p),
+                            "url": url,
+                            "units": parse_units(t)
+                        })
+                print(f"[Tesco] Found {len(products)} products via Regex")
+
         return products
     except Exception as e:
-        print(f"Tesco search error: {e}")
+        print(f"[Tesco] Error: {e}")
         return []
 
 def search_tkmaxx(query):
-    print(f"Searching TK Maxx for: {query}")
-    query_clean = " ".join(query.split()[:4])
-    url = f"https://www.tkmaxx.com/uk/en/search?text={requests.utils.quote(query_clean)}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code != 200: return []
-        soup = BeautifulSoup(resp.text, "lxml")
-        products = []
-        items = soup.select('.product-item')
-        for item in items:
-            title_tag = item.select_one('.title a')
-            price_tag = item.select_one('.price')
-            if title_tag and price_tag:
-                title = title_tag.get_text(strip=True)
-                # Extract price £12.00 -> 12.00
-                price_text = price_tag.get_text(strip=True)
-                price_match = re.search(r'£?(\d+\.\d{2})', price_text)
-                price = float(price_match.group(1)) if price_match else 0.0
-                products.append({
-                    "retailer": "TK Maxx",
-                    "title": title,
-                    "price": price,
-                    "url": title_tag['href'],
-                    "units": parse_units(title)
-                })
-        return products
-    except Exception as e:
-        print(f"TK Maxx search error: {e}")
-        return []
+    # TK Maxx 403 issue persists. Documenting as JS-rendered/Cloudflare blocked.
+    print(f"[TK Maxx] Searching: {query}")
+    print("[TK Maxx] [WARNING] Blocked by anti-bot measures (403).")
+    return []
 
 def find_best_match(amazon_item, retailer_results):
     amz_units = parse_units(amazon_item['title'])
-    best_match = None
-
+    if not amz_units: return None
     for res in retailer_results:
         if units_match(amz_units, res['units']):
-            # For now, just take the first matching unit one
-            # Ideally, check title similarity
             return res
     return None
-
-if __name__ == "__main__":
-    # Test unit parser
-    print(parse_units("Cadbury Dairy Milk 200g Pack of 2"))
-    print(parse_units("Coke 6 x 330ml"))
-
-def search_asda(query):
-    # Asda blocks simple requests, skipping for now or would need a proxy/browser automation
-    # print(f"Searching Asda for: {query}")
-    return []

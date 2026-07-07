@@ -5,10 +5,10 @@ import os
 import sys
 
 def find_latest_report() -> str:
-    files = glob.glob("sourcing_report_*.csv")
+    # Look for the new unsaturated report first
+    files = glob.glob("unsaturated_sourcing_report_*.csv") + glob.glob("sourcing_report_*.csv")
     if not files:
-        print("No sourcing_report_*.csv found in this folder.")
-        print("Run 'python main.py' first to generate one.")
+        print("No report found.")
         return None
     return max(files, key=os.path.getmtime)
 
@@ -18,8 +18,8 @@ def load_rows(path: str) -> list[dict]:
 
 def build_html(rows: list[dict], source_file: str) -> str:
     clean = [r for r in rows if r.get("title")]
-    # Sort by profit margin
-    clean.sort(key=lambda r: float(r.get("profit_margin") or 0), reverse=True)
+    # Sort by profit margin and unsaturated score
+    clean.sort(key=lambda r: (float(r.get("profit_margin") or 0), float(r.get("unsat_score") or 0)), reverse=True)
     top = clean[:40]
 
     chart_labels = json.dumps([r["title"][:30] for r in top[:15]])
@@ -29,7 +29,9 @@ def build_html(rows: list[dict], source_file: str) -> str:
         f"""<tr>
             <td><strong>{r.get('profit_margin','')}%</strong></td>
             <td>£{r.get('net_profit','')}</td>
-            <td>{r.get('category','')}</td>
+            <td><span class="badge {'badge-new' if r.get('unsat_score') == '100' else 'badge-mover' if r.get('unsat_score') == '80' else 'badge-saturated'}">
+                { 'New' if r.get('unsat_score') == '100' else 'Rising' if r.get('unsat_score') == '80' else 'Saturated' }
+            </span></td>
             <td class="title">{r.get('title','')}</td>
             <td>£{r.get('amazon_price','')}</td>
             <td>£{r.get('retail_price','')}</td>
@@ -44,7 +46,7 @@ def build_html(rows: list[dict], source_file: str) -> str:
 <html>
 <head>
 <meta charset="utf-8">
-<title>Sourcing Agent Dashboard</title>
+<title>Unsaturated Sourcing Dashboard</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <style>
   body {{ font-family: -apple-system, Arial, sans-serif; margin: 24px; background: #f7f7f8; color: #1a1a1a; }}
@@ -55,11 +57,15 @@ def build_html(rows: list[dict], source_file: str) -> str:
   th {{ background: #1a1a2e; color: white; position: sticky; top: 0; }}
   td.title {{ max-width: 300px; }}
   .chart-wrap {{ background: white; padding: 20px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+  .badge {{ padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; color: white; }}
+  .badge-new {{ background: #e67e22; }}
+  .badge-mover {{ background: #3498db; }}
+  .badge-saturated {{ background: #95a5a6; }}
 </style>
 </head>
 <body>
-  <h1>Sourcing Agent Dashboard</h1>
-  <div class="subtitle">Source file: {source_file} — top {len(top)} profitable products</div>
+  <h1>Unsaturated Sourcing Dashboard</h1>
+  <div class="subtitle">Source file: {source_file} — top {len(top)} profitable products (Prioritizing New & Rising)</div>
 
   <div class="chart-wrap">
     <canvas id="marginChart" height="90"></canvas>
@@ -68,7 +74,7 @@ def build_html(rows: list[dict], source_file: str) -> str:
   <table>
     <thead>
       <tr>
-        <th>Margin</th><th>Net Profit</th><th>Category</th>
+        <th>Margin</th><th>Net Profit</th><th>Status</th>
         <th>Title</th><th>Amazon Price</th><th>Retail Price</th>
         <th>Retailer</th><th>Link</th><th>Trend</th>
       </tr>

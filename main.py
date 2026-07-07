@@ -1,6 +1,7 @@
 """
 Sourcing Agent - Main Pipeline
 Integrates Amazon trends, Retailer price matching, and Profit calculation.
+Focuses on "Unsaturated" opportunities by checking New Releases and Movers & Shakers.
 """
 from __future__ import annotations
 import re
@@ -14,8 +15,8 @@ from config import (
 )
 from discover_categories import get_filtered_categories
 from amazon_bestsellers import get_bestsellers, get_movers_and_shakers
+from amazon_new_releases import get_new_releases
 from google_trends import get_trend_score
-from bought_count import get_bought_last_month
 from retailers import search_tesco, search_tkmaxx, find_best_match
 from profit_calculator import calculate_profit
 from brand_risk import is_risky_expanded
@@ -27,7 +28,7 @@ def parse_price(price_text: str | None) -> float | None:
     return float(match.group().replace(",", "")) if match else None
 
 def run():
-    print(f"Starting Sourcing Agent - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Starting Sourcing Agent (Unsaturated Focus) - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # 1. Discover Categories
     categories = get_filtered_categories()
@@ -35,33 +36,40 @@ def run():
 
     all_rows = []
     for cat_name, slug in categories.items():
-        all_rows.extend(get_bestsellers(cat_name, slug))
+        all_rows.extend(get_new_releases(cat_name, slug))
         all_rows.extend(get_movers_and_shakers(cat_name, slug))
+        all_rows.extend(get_bestsellers(cat_name, slug))
 
     print(f"\nCollected {len(all_rows)} raw listings. Filtering and Matching...\n")
 
-    # Filter for price < £100 and non-risky brands
     filtered_rows = []
     for row in all_rows:
         price = parse_price(row.get("price_text"))
+        if price is None:
+            continue # CRITICAL: Skip if price cannot be parsed
+
         row["amazon_price"] = price
 
-        if price and price > 100:
-            continue # Skip items > £100
+        if price > 100:
+            continue
 
         if is_risky_expanded(row.get("title")):
-            continue # Skip risky brands
+            continue
+
+        source = row.get("source")
+        if source == "new_releases": row["unsat_score"] = 100
+        elif source == "movers_and_shakers": row["unsat_score"] = 80
+        else: row["unsat_score"] = 40
 
         filtered_rows.append(row)
+
+    filtered_rows.sort(key=lambda r: (-r["unsat_score"], r.get("rank", 999)))
 
     print(f"Filtered down to {len(filtered_rows)} candidates. Searching retailers (limit {RETAILER_SEARCH_MAX_LOOKUPS})...\n")
 
     results = []
     trends_budget = TRENDS_MAX_LOOKUPS
     retail_budget = RETAILER_SEARCH_MAX_LOOKUPS
-
-    # Sort by rank to prioritize the best candidates
-    filtered_rows.sort(key=lambda r: r.get("rank", 999))
 
     for row in filtered_rows:
         if retail_budget <= 0: break
@@ -72,6 +80,8 @@ def run():
         # 2. Search Retailers
         tesco_results = search_tesco(title)
         tk_results = search_tkmaxx(title)
+        # Note: Asda implementation currently limited by anti-scraping measures
+
         retail_budget -= 1
 
         best_retail_match = find_best_match(row, tesco_results + tk_results)
@@ -101,13 +111,12 @@ def run():
 
         time.sleep(REQUEST_DELAY_SECONDS)
 
-    # Sort results by profit margin
-    results.sort(key=lambda x: x["profit_margin"], reverse=True)
+    results.sort(key=lambda x: (x["profit_margin"], x.get("momentum_pct", 0), x["unsat_score"]), reverse=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    outfile = f"sourcing_report_{timestamp}.csv"
+    outfile = f"unsaturated_sourcing_report_{timestamp}.csv"
     fieldnames = [
-        "profit_margin", "net_profit", "category", "title", "amazon_price",
+        "profit_margin", "net_profit", "unsat_score", "category", "title", "amazon_price",
         "retail_price", "retailer", "retail_url", "asin", "trend_score",
         "momentum_pct", "total_costs"
     ]
@@ -117,8 +126,7 @@ def run():
         writer.writeheader()
         writer.writerows(results)
 
-    print(f"\nDone. {len(results)} profitable products written to {outfile}")
-    print("Run 'python generate_sourcing_dashboard.py' to view results.")
+    print(f"\nDone. {len(results)} unsaturated profitable products written to {outfile}")
 
 if __name__ == "__main__":
     run()
