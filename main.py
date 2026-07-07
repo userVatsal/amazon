@@ -1,7 +1,5 @@
 """
-Sourcing Agent - Main Pipeline
-Integrates Amazon trends, Retailer price matching, and Profit calculation.
-Focuses on "Unsaturated" opportunities by checking New Releases and Movers & Shakers.
+Sourcing Agent - Advanced main pipeline with Database and WhatsApp Notifications.
 """
 from __future__ import annotations
 import re, csv, time
@@ -14,6 +12,8 @@ from google_trends import get_trend_score
 from retailers import search_tesco, search_tkmaxx, search_asda, find_best_match
 from profit_calculator import calculate_profit
 from brand_risk import is_risky_expanded
+from database import init_db, save_scan_result
+from notifications import send_whatsapp_alert
 
 def parse_price(price_text: str | None) -> float | None:
     if not price_text: return None
@@ -21,9 +21,9 @@ def parse_price(price_text: str | None) -> float | None:
     return float(match.group().replace(",", "")) if match else None
 
 def run():
-    print(f"Starting Sourcing Agent (Unsaturated Focus) - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Starting Sourcing Agent - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    init_db()
 
-    # 1. Discover Categories
     categories = get_filtered_categories()
 
     all_rows = []
@@ -46,8 +46,6 @@ def run():
 
     filtered_rows.sort(key=lambda r: (-r["unsat_score"], r.get("rank", 999)))
 
-    print(f"Filtered down to {len(filtered_rows)} candidates. Searching retailers (limit {config.RETAILER_SEARCH_MAX_LOOKUPS})...\n")
-
     results = []
     trends_budget = config.TRENDS_MAX_LOOKUPS
     retail_budget = config.RETAILER_SEARCH_MAX_LOOKUPS
@@ -57,7 +55,6 @@ def run():
         title = row.get("title")
         if not title: continue
 
-        # 2. Search Retailers (Diagnostic logging is inside these functions)
         tesco_res = search_tesco(title)
         tk_res = search_tkmaxx(title)
         asda_res = search_asda(title)
@@ -70,35 +67,33 @@ def run():
             row["retailer"] = best_retail_match["retailer"]
             row["retail_url"] = best_retail_match["url"]
 
-            # 3. Calculate Profit
             profit_data = calculate_profit(row["retail_price"], row["amazon_price"], row["category"])
             row.update(profit_data)
 
-            # 4. Check Trends if profitable
-            if row["profit_margin"] >= 40 and trends_budget > 0:
-                print(f"  [Match Found] {title} - Profit: £{row['net_profit']} ({row['profit_margin']}%)")
-                trend = get_trend_score(title)
-                row["trend_score"] = trend["avg_interest"]
-                row["momentum_pct"] = trend["momentum_pct"]
-                trends_budget -= 1
-            else:
-                row["trend_score"] = 0
-                row["momentum_pct"] = 0
-
             if row["profit_margin"] >= 40:
+                print(f"  [Match Found] {title} - Profit: £{row['net_profit']} ({row['profit_margin']}%)")
+
+                # Check Trends
+                if trends_budget > 0:
+                    trend = get_trend_score(title)
+                    row["trend_score"], row["momentum_pct"] = trend["avg_interest"], trend["momentum_pct"]
+                    trends_budget -= 1
+
                 results.append(row)
+                save_scan_result(row)
+
+                # Send Alert
+                send_whatsapp_alert(
+                    row["title"], row["profit_margin"], row["net_profit"],
+                    row["retailer"], row["retail_url"]
+                )
 
         time.sleep(config.REQUEST_DELAY_SECONDS)
 
     results.sort(key=lambda x: (x["profit_margin"], x.get("momentum_pct", 0), x["unsat_score"]), reverse=True)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     outfile = f"unsaturated_sourcing_report_{timestamp}.csv"
-    fieldnames = [
-        "profit_margin", "net_profit", "unsat_score", "category", "title", "amazon_price",
-        "retail_price", "retailer", "retail_url", "asin", "trend_score",
-        "momentum_pct", "total_costs"
-    ]
+    fieldnames = ["profit_margin", "net_profit", "unsat_score", "category", "title", "amazon_price", "retail_price", "retailer", "retail_url", "asin", "trend_score", "momentum_pct", "total_costs"]
 
     with open(outfile, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
