@@ -1,43 +1,38 @@
-# Amazon UK Sourcing Agent
+# Advanced Amazon UK Sourcing Agent
 
-Automated tool to find profitable products from UK retailers (Tesco, TK Maxx) to sell on Amazon UK.
+A professional-grade automated tool to identify profitable, unsaturated products from UK retailers (Tesco, TK Maxx, Asda) to sell on Amazon UK.
 
 ## Features
-- **Trend Detection**: Identifies trending products using Amazon Best Sellers and Google Trends.
-- **Dynamic Category Discovery**: Automatically finds "Open" and "Non-returnable" categories.
-- **Retailer Price Matching**: Searches for identical items (with unit/weight matching) at Tesco and TK Maxx.
-- **Profit Calculation**: Estimates net profit factoring in referral fees, FBA fees, and fixed monthly costs.
-- **Risk Mitigation**: Filters out brands known for Intellectual Property (IP) complaints.
+- **Unsaturated Focus**: Prioritizes "Hot New Releases" and "Movers & Shakers" to find trends before they become saturated.
+- **Robust Price Matching**: Advanced matching for Tesco (using mobile headers and JSON/Regex parsing) with strict unit/weight verification.
+- **Historical Tracking**: Local SQLite database stores every scan, allowing you to track price and rank changes over time.
+- **WhatsApp Alerts**: Instant notifications via WhatsApp when a product hitting your 40% profit target is found.
+- **Automated Scheduling**: Built-in scheduler to run scans autonomously every few hours.
+- **Profit Calculator**: Precise calculation factoring in Amazon referral fees, FBA fees, and your £36/month fixed business costs.
+- **Risk Mitigation**: Built-in filter for brands known for IP complaints.
 
-## Requirements
-- Python 3.8+
-- Requirements from `requirements.txt`
-
-## Usage
+## Setup
 1. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-2. Run the sourcing agent:
-   ```bash
-   python main.py
-   ```
-3. Generate the visual dashboard:
-   ```bash
-   python generate_sourcing_dashboard.py
-   ```
-4. Open `sourcing_dashboard.html` in your browser to view the results.
+2. Configure your settings in `config.py`.
 
-## Configuration
-Edit `config.py` to adjust:
-- `RETAILER_SEARCH_MAX_LOOKUPS`: Limit how many products to search for at retailers (prevents IP blocking).
-- `TRENDS_MAX_LOOKUPS`: Limit Google Trends requests.
-- `REQUEST_DELAY_SECONDS`: Delay between requests to avoid rate limits.
+## WhatsApp Setup (Optional)
+To receive alerts on your phone:
+1. Add **+34 644 20 13 23** to your phone contacts.
+2. Send a WhatsApp message to this number: `I allow callmebot to send me messages`.
+3. You will receive an API Key.
+4. In `config.py`, enter your phone number (international format, e.g., `447123456789`) and the API Key.
 
-## Disclaimer
-Scraping retail websites is subject to their Terms of Service. Use this tool responsibly and infrequently.
+## Usage
+- **Run Once**: `python main.py`
+- **Run Continuously (Scheduler)**: `python scheduler.py`
+- **Generate Dashboard**: `python generate_sourcing_dashboard.py`
 
 ## Retailer Status
-- **Tesco**: Fully supported.
-- **TK Maxx**: Fully supported.
-- **Asda**: Currently stubbed due to high anti-scraping/Cloudflare protection. Requires browser automation or proxy services for production use.
+- **Tesco**: Fully supported (Robust).
+- **TK Maxx & Asda**: Currently flagged as blocked by anti-bot measures (403). These require advanced browser automation or premium proxy services for production use.
+
+## Disclaimer
+This tool is for educational and personal use. Scraping retail websites may violate their Terms of Service.
