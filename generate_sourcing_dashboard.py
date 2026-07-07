@@ -1,15 +1,8 @@
-import csv
-import glob
-import json
-import os
-import sys
+import csv, glob, json, os, sys
 
 def find_latest_report() -> str:
-    # Look for the new unsaturated report first
-    files = glob.glob("unsaturated_sourcing_report_*.csv") + glob.glob("sourcing_report_*.csv")
-    if not files:
-        print("No report found.")
-        return None
+    files = glob.glob("unsaturated_sourcing_report_*.csv")
+    if not files: return None
     return max(files, key=os.path.getmtime)
 
 def load_rows(path: str) -> list[dict]:
@@ -18,7 +11,6 @@ def load_rows(path: str) -> list[dict]:
 
 def build_html(rows: list[dict], source_file: str) -> str:
     clean = [r for r in rows if r.get("title")]
-    # Sort by profit margin and unsaturated score
     clean.sort(key=lambda r: (float(r.get("profit_margin") or 0), float(r.get("unsat_score") or 0)), reverse=True)
     top = clean[:40]
 
@@ -65,25 +57,12 @@ def build_html(rows: list[dict], source_file: str) -> str:
 </head>
 <body>
   <h1>Unsaturated Sourcing Dashboard</h1>
-  <div class="subtitle">Source file: {source_file} — top {len(top)} profitable products (Prioritizing New & Rising)</div>
-
-  <div class="chart-wrap">
-    <canvas id="marginChart" height="90"></canvas>
-  </div>
-
+  <div class="subtitle">Source file: {source_file} — top {len(top)} profitable products</div>
+  <div class="chart-wrap"><canvas id="marginChart" height="90"></canvas></div>
   <table>
-    <thead>
-      <tr>
-        <th>Margin</th><th>Net Profit</th><th>Status</th>
-        <th>Title</th><th>Amazon Price</th><th>Retail Price</th>
-        <th>Retailer</th><th>Link</th><th>Trend</th>
-      </tr>
-    </thead>
-    <tbody>
-      {table_rows}
-    </tbody>
+    <thead><tr><th>Margin</th><th>Net Profit</th><th>Status</th><th>Title</th><th>Amazon Price</th><th>Retail Price</th><th>Retailer</th><th>Link</th><th>Trend</th></tr></thead>
+    <tbody>{table_rows}</tbody>
   </table>
-
 <script>
 new Chart(document.getElementById('marginChart'), {{
   type: 'bar',
@@ -109,5 +88,4 @@ def run():
         f.write(html)
     print(f"Built sourcing_dashboard.html from {report_file}")
 
-if __name__ == "__main__":
-    run()
+if __name__ == "__main__": run()

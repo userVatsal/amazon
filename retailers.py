@@ -61,16 +61,13 @@ def units_match(units1, units2):
             if abs(u1_dict[key] - u2_dict[key]) > 0.1:
                 return False
         elif key in u1_dict or key in u2_dict:
-            # One side has a specific unit, the other doesn't.
-            # This is generally a mismatch, unless we're comparing a title that just missed the unit.
-            # But for safety, let's keep it strict.
             return False
 
     # If no specific units matched, check pack size
     if not matched_at_least_one_specific:
         if u1_dict.get('pack', 1.0) != u2_dict.get('pack', 1.0):
             return False
-        return True # Both just have the same pack size and no other units
+        return True
 
     return True
 
@@ -80,14 +77,12 @@ def search_tesco(query):
     print(f"[Tesco] Searching: {url}")
     try:
         resp = requests.get(url, headers=MOBILE_HEADERS, timeout=10)
+        print(f"[Tesco] Status: {resp.status_code}")
         if resp.status_code != 200:
-            print(f"[Tesco] Status: {resp.status_code}")
             return []
 
         products = []
         soup = BeautifulSoup(resp.text, "lxml")
-
-        # Method 1: JSON blob (__NEXT_DATA__)
         script = soup.find("script", id="__NEXT_DATA__")
         if script:
             try:
@@ -105,16 +100,15 @@ def search_tesco(query):
                             "url": "https://www.tesco.com/groceries/en-GB/products/" + str(p.get("id", "")),
                             "units": parse_units(title)
                         })
-                if products: print(f"[Tesco] Found {len(products)} products via JSON")
+                if products: print(f"  -> Found {len(products)} products via JSON")
             except: pass
 
-        # Method 2: Regex fallback
         if not products:
             titles = re.findall(r'\"title\":\"([^\"]+)\"', resp.text)
             prices = re.findall(r'\"unitPrice\":([0-9.]+)', resp.text)
             if titles and prices:
                 for t, p in zip(titles, prices):
-                    if len(t) > 5 and not t.startswith("Sort and filter"):
+                    if len(t) > 5 and not t.startswith("Sort and filter") and not t.startswith("Tesco Groceries"):
                         products.append({
                             "retailer": "Tesco",
                             "title": t,
@@ -122,18 +116,45 @@ def search_tesco(query):
                             "url": url,
                             "units": parse_units(t)
                         })
-                print(f"[Tesco] Found {len(products)} products via Regex")
+                if products: print(f"  -> Found {len(products)} products via Regex")
+
+        if not products:
+            print("  -> No products found on page.")
 
         return products
     except Exception as e:
-        print(f"[Tesco] Error: {e}")
+        print(f"  -> Error: {e}")
         return []
 
 def search_tkmaxx(query):
-    # TK Maxx 403 issue persists. Documenting as JS-rendered/Cloudflare blocked.
-    print(f"[TK Maxx] Searching: {query}")
-    print("[TK Maxx] [WARNING] Blocked by anti-bot measures (403).")
-    return []
+    query_clean = " ".join(query.split()[:4])
+    url = f"https://www.tkmaxx.com/uk/en/search?text={requests.utils.quote(query_clean)}"
+    print(f"[TK Maxx] Searching: {url}")
+    try:
+        resp = requests.get(url, headers=MOBILE_HEADERS, timeout=10)
+        print(f"[TK Maxx] Status: {resp.status_code}")
+        # Standard HTTP requests are typically blocked by Cloudflare (403)
+        if resp.status_code == 403:
+            print("  -> [WARNING] Blocked by Cloudflare (403). Requires browser automation.")
+        return []
+    except Exception as e:
+        print(f"  -> Error: {e}")
+        return []
+
+def search_asda(query):
+    query_clean = " ".join(query.split()[:4])
+    url = f"https://groceries.asda.com/search/{requests.utils.quote(query_clean)}"
+    print(f"[Asda] Searching: {url}")
+    try:
+        resp = requests.get(url, headers=MOBILE_HEADERS, timeout=10)
+        print(f"[Asda] Status: {resp.status_code}")
+        # Asda is very JS-heavy and typically returns 403 or empty 200 without a session
+        if resp.status_code == 403:
+            print("  -> [WARNING] Blocked by anti-bot measures (403).")
+        return []
+    except Exception as e:
+        print(f"  -> Error: {e}")
+        return []
 
 def find_best_match(amazon_item, retailer_results):
     amz_units = parse_units(amazon_item['title'])
