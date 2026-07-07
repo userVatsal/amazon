@@ -1,27 +1,24 @@
 """
-Trend layer entry point.
-
-Run: python main.py
-
-Output: trend_report_<timestamp>.csv — ranked list of candidate products
-with Amazon rank data + Google Trends momentum + a combined trend_score
-+ Amazon's own disclosed "X+ bought in past month" badge (bucketed,
-real data — see bought_count.py) for the top-ranked candidates.
-
-This is layer 1 of the pipeline. It tells you WHAT looks worth chasing.
-It does NOT check retailer prices or Amazon fees/margin — that's the
-price-match layer and profit calculator, built next.
+Sourcing Agent - Main Pipeline
+Integrates Amazon trends, Retailer price matching, and Profit calculation.
 """
 from __future__ import annotations
 import re
 import csv
+import time
 from datetime import datetime
 
-from config import CATEGORIES, TRENDS_MAX_LOOKUPS, BOUGHT_COUNT_MAX_LOOKUPS
+from config import (
+    TRENDS_MAX_LOOKUPS, BOUGHT_COUNT_MAX_LOOKUPS,
+    REQUEST_DELAY_SECONDS, RETAILER_SEARCH_MAX_LOOKUPS
+)
+from discover_categories import get_filtered_categories
 from amazon_bestsellers import get_bestsellers, get_movers_and_shakers
 from google_trends import get_trend_score
 from bought_count import get_bought_last_month
-
+from retailers import search_tesco, search_tkmaxx, find_best_match
+from profit_calculator import calculate_profit
+from brand_risk import is_risky_expanded
 
 def parse_price(price_text: str | None) -> float | None:
     if not price_text:
@@ -29,86 +26,99 @@ def parse_price(price_text: str | None) -> float | None:
     match = re.search(r"[\d,]+\.\d{2}", price_text.replace("£", ""))
     return float(match.group().replace(",", "")) if match else None
 
-
-def parse_rating_count(rating_text: str | None) -> float | None:
-    if not rating_text:
-        return None
-    match = re.search(r"[\d.]+", rating_text)
-    return float(match.group()) if match else None
-
-
-def score_row(row: dict) -> float:
-    """Combines Amazon rank (lower = better) and Trends momentum
-    (higher = better) into one comparable score, 0-100."""
-    rank_score = max(0, 100 - row.get("rank", 100))
-    momentum = row.get("momentum_pct") or 0
-    momentum_score = max(0, min(100, 50 + momentum))  # center at 50
-    mover_bonus = 15 if row.get("source") == "movers_and_shakers" else 0
-    return round((rank_score * 0.5) + (momentum_score * 0.4) + mover_bonus, 1)
-
-
 def run():
+    print(f"Starting Sourcing Agent - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # 1. Discover Categories
+    categories = get_filtered_categories()
+    print(f"Targeting categories: {', '.join(categories.keys())}")
+
     all_rows = []
+    for cat_name, slug in categories.items():
+        all_rows.extend(get_bestsellers(cat_name, slug))
+        all_rows.extend(get_movers_and_shakers(cat_name, slug))
 
-    for category_name, slug in CATEGORIES.items():
-        all_rows.extend(get_bestsellers(category_name, slug))
-        all_rows.extend(get_movers_and_shakers(category_name, slug))
+    print(f"\nCollected {len(all_rows)} raw listings. Filtering and Matching...\n")
 
-    print(f"\nCollected {len(all_rows)} raw listings. Scoring trend momentum...\n")
-
-    # Only spend Trends calls on the best-ranked candidates (rank <= a
-    # threshold), capped at TRENDS_MAX_LOOKUPS overall — this is the
-    # single biggest lever against Google's 429 rate limiting. Every
-    # other row still gets written out, just without momentum data.
-    all_rows.sort(key=lambda r: r.get("rank", 999))
-    lookup_budget = TRENDS_MAX_LOOKUPS
-
+    # Filter for price < £100 and non-risky brands
+    filtered_rows = []
     for row in all_rows:
-        row["price_gbp"] = parse_price(row.get("price_text"))
-        row["rating_score"] = parse_rating_count(row.get("rating_text"))
+        price = parse_price(row.get("price_text"))
+        row["amazon_price"] = price
 
-        if row.get("title") and lookup_budget > 0:
-            trend = get_trend_score(row.get("title"))
-            lookup_budget -= 1
-        else:
-            trend = {"query": None, "avg_interest": None, "momentum_pct": None}
+        if price and price > 100:
+            continue # Skip items > £100
 
-        row["trend_query"] = trend["query"]
-        row["avg_interest"] = trend["avg_interest"]
-        row["momentum_pct"] = trend["momentum_pct"]
+        if is_risky_expanded(row.get("title")):
+            continue # Skip risky brands
 
-        row["trend_score"] = score_row(row)
+        filtered_rows.append(row)
 
-    all_rows.sort(key=lambda r: r["trend_score"], reverse=True)
+    print(f"Filtered down to {len(filtered_rows)} candidates. Searching retailers (limit {RETAILER_SEARCH_MAX_LOOKUPS})...\n")
 
-    # Bought-count badge is the most request-heavy lookup (one full
-    # product page per item), so it only runs on the FINAL top-ranked
-    # candidates — the ones actually worth a closer look — not the
-    # whole list.
-    print(f"\nChecking 'bought in past month' badge on top {BOUGHT_COUNT_MAX_LOOKUPS} candidates...\n")
-    bought_budget = BOUGHT_COUNT_MAX_LOOKUPS
-    for row in all_rows:
-        if row.get("asin") and bought_budget > 0:
-            row["bought_last_month"] = get_bought_last_month(row["asin"])
-            bought_budget -= 1
-        else:
-            row["bought_last_month"] = None
+    results = []
+    trends_budget = TRENDS_MAX_LOOKUPS
+    retail_budget = RETAILER_SEARCH_MAX_LOOKUPS
+
+    # Sort by rank to prioritize the best candidates
+    filtered_rows.sort(key=lambda r: r.get("rank", 999))
+
+    for row in filtered_rows:
+        if retail_budget <= 0: break
+
+        title = row.get("title")
+        if not title: continue
+
+        # 2. Search Retailers
+        tesco_results = search_tesco(title)
+        tk_results = search_tkmaxx(title)
+        retail_budget -= 1
+
+        best_retail_match = find_best_match(row, tesco_results + tk_results)
+
+        if best_retail_match:
+            row["retail_price"] = best_retail_match["price"]
+            row["retailer"] = best_retail_match["retailer"]
+            row["retail_url"] = best_retail_match["url"]
+
+            # 3. Calculate Profit
+            profit_data = calculate_profit(row["retail_price"], row["amazon_price"], row["category"])
+            row.update(profit_data)
+
+            # 4. Check Trends if profitable
+            if row["profit_margin"] >= 40 and trends_budget > 0:
+                print(f"  [Match Found] {title} - Profit: £{row['net_profit']} ({row['profit_margin']}%)")
+                trend = get_trend_score(title)
+                row["trend_score"] = trend["avg_interest"]
+                row["momentum_pct"] = trend["momentum_pct"]
+                trends_budget -= 1
+            else:
+                row["trend_score"] = 0
+                row["momentum_pct"] = 0
+
+            if row["profit_margin"] >= 40:
+                results.append(row)
+
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    # Sort results by profit margin
+    results.sort(key=lambda x: x["profit_margin"], reverse=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    outfile = f"trend_report_{timestamp}.csv"
+    outfile = f"sourcing_report_{timestamp}.csv"
     fieldnames = [
-        "trend_score", "category", "source", "rank", "asin", "title",
-        "price_gbp", "rating_score", "avg_interest", "momentum_pct",
-        "bought_last_month",
+        "profit_margin", "net_profit", "category", "title", "amazon_price",
+        "retail_price", "retailer", "retail_url", "asin", "trend_score",
+        "momentum_pct", "total_costs"
     ]
+
     with open(outfile, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(all_rows)
+        writer.writerows(results)
 
-    print(f"Done. {len(all_rows)} products written to {outfile}")
-    print("Next: feed the top rows (highest trend_score) into the price-match layer.")
-
+    print(f"\nDone. {len(results)} profitable products written to {outfile}")
+    print("Run 'python generate_sourcing_dashboard.py' to view results.")
 
 if __name__ == "__main__":
     run()
