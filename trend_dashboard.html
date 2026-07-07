@@ -1,0 +1,131 @@
+"""
+Reads the most recent trend_report_*.csv (produced by main.py) and
+generates an HTML dashboard you can open in your browser.
+
+Run: python3 generate_dashboard.py
+Then: open trend_dashboard.html        (macOS)
+
+Shows what we actually have data for: trend score, Amazon rank source,
+price, rating, Trends momentum. It deliberately does NOT show a "where
+to buy" or "predicted sales" column with made-up numbers — those need
+the price-match layer and a real sales-velocity source (e.g. Keepa)
+that don't exist in this pipeline yet. Building fake figures into a
+dashboard would make it look more trustworthy than it is.
+"""
+import csv
+import glob
+import json
+import os
+import sys
+
+def find_latest_report() -> str:
+    files = glob.glob("trend_report_*.csv")
+    if not files:
+        print("No trend_report_*.csv found in this folder.")
+        print("Run 'python main.py' first to generate one.")
+        sys.exit(1)
+    return max(files, key=os.path.getmtime)
+
+def load_rows(path: str) -> list[dict]:
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+def build_html(rows: list[dict], source_file: str) -> str:
+    # Keep only rows with a title, top 40 by trend_score for readability
+    clean = [r for r in rows if r.get("title")]
+    clean.sort(key=lambda r: float(r.get("trend_score") or 0), reverse=True)
+    top = clean[:40]
+
+    chart_labels = json.dumps([r["title"][:40] for r in top[:15]])
+    chart_scores = json.dumps([float(r.get("trend_score") or 0) for r in top[:15]])
+
+    table_rows = "\n".join(
+        f"""<tr>
+            <td>{r.get('trend_score','')}</td>
+            <td>{r.get('category','')}</td>
+            <td>{r.get('source','')}</td>
+            <td>{r.get('rank','')}</td>
+            <td class="title">{r.get('title','')}</td>
+            <td>£{r.get('price_gbp','') or '-'}</td>
+            <td>{r.get('momentum_pct','') or '-'}%</td>
+            <td>{r.get('bought_last_month') or '<span class="pending">no badge / not checked</span>'}</td>
+            <td class="pending">Not yet — price-match layer needed</td>
+        </tr>"""
+        for r in top
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Trend Layer Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  body {{ font-family: -apple-system, Arial, sans-serif; margin: 24px; background: #f7f7f8; color: #1a1a1a; }}
+  h1 {{ margin-bottom: 4px; }}
+  .subtitle {{ color: #666; margin-bottom: 24px; font-size: 14px; }}
+  .warning {{ background: #fff4e5; border: 1px solid #f0c36d; padding: 12px 16px; border-radius: 8px; margin-bottom: 24px; font-size: 14px; }}
+  table {{ border-collapse: collapse; width: 100%; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+  th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }}
+  th {{ background: #1a1a2e; color: white; position: sticky; top: 0; }}
+  td.title {{ max-width: 280px; }}
+  td.pending {{ color: #999; font-style: italic; }}
+  .chart-wrap {{ background: white; padding: 20px; border-radius: 8px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+</style>
+</head>
+<body>
+  <h1>Trend Layer Dashboard</h1>
+  <div class="subtitle">Source file: {source_file} — top {len(top)} products by trend_score</div>
+
+  <div class="warning">
+    <strong>What this shows:</strong> Amazon UK Best Sellers/Movers rank + Google Trends UK momentum +
+    Amazon's own disclosed "bought in past month" badge (real data, but bucketed/rounded — e.g. "600+" —
+    and only checked for a capped number of top candidates to respect Amazon's rate limits).
+    <strong>What it doesn't show yet:</strong> where to source each product locally —
+    that needs the price-match layer (Tesco/Asda/TK Maxx lookup), which doesn't exist in this pipeline yet.
+  </div>
+
+  <div class="chart-wrap">
+    <canvas id="scoreChart" height="90"></canvas>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Trend Score</th><th>Category</th><th>Source</th><th>Rank</th>
+        <th>Title</th><th>Price</th><th>Momentum</th>
+        <th>Bought last month</th><th>Where to buy</th>
+      </tr>
+    </thead>
+    <tbody>
+      {table_rows}
+    </tbody>
+  </table>
+
+<script>
+new Chart(document.getElementById('scoreChart'), {{
+  type: 'bar',
+  data: {{
+    labels: {chart_labels},
+    datasets: [{{ label: 'Trend Score', data: {chart_scores}, backgroundColor: '#1a1a2e' }}]
+  }},
+  options: {{
+    plugins: {{ legend: {{ display: false }}, title: {{ display: true, text: 'Top 15 by Trend Score' }} }},
+    scales: {{ x: {{ ticks: {{ autoSkip: false, maxRotation: 60, minRotation: 40 }} }} }}
+  }}
+}});
+</script>
+</body>
+</html>"""
+
+def run():
+    report_file = find_latest_report()
+    rows = load_rows(report_file)
+    html = build_html(rows, report_file)
+    with open("trend_dashboard.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"Built trend_dashboard.html from {report_file}")
+    print("Open it with: open trend_dashboard.html")
+
+if __name__ == "__main__":
+    run()

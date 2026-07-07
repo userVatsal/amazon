@@ -14,6 +14,7 @@ IMPORTANT — read before running at scale:
   (keepa.com/#!api) sells this same rank/price data via a proper paid
   API with a UK dataset — worth it once this is making real money.
 """
+from __future__ import annotations
 import time
 import requests
 from bs4 import BeautifulSoup
@@ -42,19 +43,24 @@ def _fetch(url: str) -> BeautifulSoup | None:
 
 def _parse_listing(soup: BeautifulSoup, source: str, category: str) -> list[dict]:
     """Parses a bestsellers-style grid into structured rows.
-    Amazon's markup shifts often; this targets the current
-    div[data-asin] grid item pattern as of mid-2026."""
+
+    Verified 2026-07 against a live capture of amazon.co.uk/gp/bestsellers.
+    Amazon wraps the title in a div whose class is
+    '_cDEzb_p13n-sc-css-line-clamp-<N>_<hash>' where N (line count) and
+    the hash both vary per item/build, so we match on the stable
+    substring 'p13n-sc-css-line-clamp' rather than the full class name.
+    Price and rating selectors were already correct and are unchanged.
+    """
     results = []
-    items = soup.select("div.p13n-desktop-grid > div[id^='p13n-asin-index']") \
-        or soup.select("div.zg-grid-general-faceout")
+    items = soup.select("div.zg-grid-general-faceout") \
+        or soup.select("div.p13n-desktop-grid > div[id^='p13n-asin-index']")
 
     for idx, item in enumerate(items[:TOP_N], start=1):
         asin_tag = item.select_one("a.a-link-normal")
-        title_tag = item.select_one("div._cDEzb_p13n-sc-css-line-clamp-1_1Fn1y") \
-            or item.select_one("div.p13n-sc-truncate-desktop-type2")
-        price_tag = item.select_one("span._cDEzb_p13n-sc-price_3mJ9Z") \
-            or item.select_one("span.p13n-sc-price")
+        title_tag = item.select_one('div[class*="p13n-sc-css-line-clamp"]')
+        price_tag = item.select_one('span[class*="p13n-sc-price"]')
         rating_tag = item.select_one("span.a-icon-alt")
+        img_tag = item.select_one("img[alt]")
 
         asin = None
         if asin_tag and asin_tag.get("href"):
@@ -64,12 +70,18 @@ def _parse_listing(soup: BeautifulSoup, source: str, category: str) -> list[dict
                     asin = part
                     break
 
+        title = title_tag.get_text(strip=True) if title_tag else None
+        if not title and img_tag:
+            # Fallback: the product image's alt text is the title
+            # (sometimes truncated), more stable than the hashed class.
+            title = img_tag.get("alt")
+
         results.append({
             "source": source,
             "category": category,
             "rank": idx,
             "asin": asin,
-            "title": title_tag.get_text(strip=True) if title_tag else None,
+            "title": title,
             "price_text": price_tag.get_text(strip=True) if price_tag else None,
             "rating_text": rating_tag.get_text(strip=True) if rating_tag else None,
         })

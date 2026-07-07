@@ -24,10 +24,25 @@ TOP_N = 50
 TRENDS_TIMEFRAME = "today 1-m"
 TRENDS_GEO = "GB"
 
+# Google's free Trends endpoint aggressively rate-limits (HTTP 429) if
+# hit too many times in a row. Two mitigations: space calls out much
+# more than the scraping delay, and only bother checking momentum for
+# a capped number of top candidates (by Amazon rank) instead of every
+# single product — you don't need Trends data on rank #47 in Grocery.
+TRENDS_DELAY_SECONDS = 12
+TRENDS_MAX_LOOKUPS = 30
+TRENDS_MAX_RETRIES = 2
+
 # Minimum acceptable ROI% before a product is even worth checking
 # against retail prices in the next layer. This is a pre-filter, not
 # the final profit calculation.
 MIN_ROI_PREFILTER = 25
+
+# "X+ bought in past month" badge lookups: real Amazon-disclosed data,
+# but requires one extra page fetch per product, so cap it hard and
+# space it out — this is the most request-heavy part of the pipeline.
+BOUGHT_COUNT_MAX_LOOKUPS = 20
+BOUGHT_COUNT_DELAY_SECONDS = 4
 
 # Request pacing to avoid getting rate-limited / blocked.
 REQUEST_DELAY_SECONDS = 3
