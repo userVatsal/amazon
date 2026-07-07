@@ -9,30 +9,23 @@ HEADERS = {
 
 def parse_units(title):
     if not title: return []
-    # Matches 500g, 1kg, 100ml, 1.5L, Pack of 6, 6 x 500ml etc.
-    # We want to normalize these
     title = title.lower()
     units = []
 
-    # 1. Look for "Pack of X" or "X pack"
     pack_match = re.search(r'pack of (\d+)', title) or re.search(r'(\d+)\s*pack', title)
-    if pack_match:
-        units.append(("pack", float(pack_match.group(1))))
+    pack_size = float(pack_match.group(1)) if pack_match else 1.0
+    units.append(("pack", pack_size))
 
-    # 2. Look for weight/volume
-    # (\d+(?:\.\d+)?)\s*(g|kg|ml|l)
     vol_matches = re.findall(r'(\d+(?:\.\d+)?)\s*(g|kg|ml|l)\b', title)
     for val, unit in vol_matches:
         val = float(val)
-        if unit == 'kg':
-            val *= 1000
-            unit = 'g'
-        elif unit == 'l':
-            val *= 1000
-            unit = 'ml'
+        if unit == 'kg': val *= 1000; unit = 'g'
+        elif unit == 'l': val *= 1000; unit = 'ml'
         units.append((unit, val))
+        # Also track total weight/volume if pack size > 1
+        if pack_size > 1:
+            units.append(("total_" + unit, val * pack_size))
 
-    # 3. Look for X x Yml
     mult_matches = re.findall(r'(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*(g|kg|ml|l)\b', title)
     for count, val, unit in mult_matches:
         count = float(count)
@@ -44,44 +37,55 @@ def parse_units(title):
     return units
 
 def units_match(units1, units2):
-    if not units1 or not units2: return True # If we can't find units, we assume they might match (optimistic)
+    # CRITICAL: Strict matching. If we have unit info, it MUST match.
+    if not units1 or not units2:
+        return False # Safer: If we can't find units on one side, don't risk a mismatch
 
-    # If both have units, they MUST match at least one significant unit
-    for u1 in units1:
-        for u2 in units2:
-            if u1[0] == u2[0]:
-                if abs(u1[1] - u2[1]) > 0.01: # allow tiny float diff
-                    return False
+    # Check packs
+    u1_dict = dict(units1)
+    u2_dict = dict(units2)
+
+    if u1_dict.get('pack', 1.0) != u2_dict.get('pack', 1.0):
+        return False
+
+    # Check weights/volumes
+    for key in ['g', 'ml', 'total_g', 'total_ml']:
+        if key in u1_dict and key in u2_dict:
+            if abs(u1_dict[key] - u2_dict[key]) > 0.1:
+                return False
+        elif key in u1_dict or key in u2_dict:
+            # If one has a specific weight/volume and the other doesn't, it's risky
+            return False
+
     return True
 
 def search_tesco(query):
-    # Tesco often blocks simple requests, using a cleaner search URL
     print(f"Searching Tesco for: {query}")
-    query_clean = " ".join(query.split()[:5]) # keep it short
+    query_clean = " ".join(query.split()[:5])
     url = f"https://www.tesco.com/groceries/en-GB/search?query={requests.utils.quote(query_clean)}"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code != 200: return []
         soup = BeautifulSoup(resp.text, "lxml")
         products = []
-        # Update selector based on current Tesco layout if possible
         items = soup.select('.product-list--list-item')
         for item in items:
             title_tag = item.select_one('h3 a')
             price_tag = item.select_one('.value')
             if title_tag and price_tag:
                 title = title_tag.get_text(strip=True)
-                price = float(price_tag.get_text(strip=True).replace("£", ""))
-                products.append({
-                    "retailer": "Tesco",
-                    "title": title,
-                    "price": price,
-                    "url": "https://www.tesco.com" + title_tag['href'],
-                    "units": parse_units(title)
-                })
+                try:
+                    price = float(price_tag.get_text(strip=True).replace("£", ""))
+                    products.append({
+                        "retailer": "Tesco",
+                        "title": title,
+                        "price": price,
+                        "url": "https://www.tesco.com" + title_tag['href'],
+                        "units": parse_units(title)
+                    })
+                except: continue
         return products
-    except Exception as e:
-        print(f"Tesco search error: {e}")
+    except:
         return []
 
 def search_tkmaxx(query):
@@ -99,39 +103,26 @@ def search_tkmaxx(query):
             price_tag = item.select_one('.price')
             if title_tag and price_tag:
                 title = title_tag.get_text(strip=True)
-                # Extract price £12.00 -> 12.00
                 price_text = price_tag.get_text(strip=True)
                 price_match = re.search(r'£?(\d+\.\d{2})', price_text)
-                price = float(price_match.group(1)) if price_match else 0.0
-                products.append({
-                    "retailer": "TK Maxx",
-                    "title": title,
-                    "price": price,
-                    "url": title_tag['href'],
-                    "units": parse_units(title)
-                })
+                if price_match:
+                    price = float(price_match.group(1))
+                    products.append({
+                        "retailer": "TK Maxx",
+                        "title": title,
+                        "price": price,
+                        "url": title_tag['href'],
+                        "units": parse_units(title)
+                    })
         return products
-    except Exception as e:
-        print(f"TK Maxx search error: {e}")
+    except:
         return []
 
 def find_best_match(amazon_item, retailer_results):
     amz_units = parse_units(amazon_item['title'])
-    best_match = None
+    if not amz_units: return None # Safety
 
     for res in retailer_results:
         if units_match(amz_units, res['units']):
-            # For now, just take the first matching unit one
-            # Ideally, check title similarity
             return res
     return None
-
-if __name__ == "__main__":
-    # Test unit parser
-    print(parse_units("Cadbury Dairy Milk 200g Pack of 2"))
-    print(parse_units("Coke 6 x 330ml"))
-
-def search_asda(query):
-    # Asda blocks simple requests, skipping for now or would need a proxy/browser automation
-    # print(f"Searching Asda for: {query}")
-    return []

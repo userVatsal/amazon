@@ -36,3 +36,8 @@ Edit `config.py` to adjust:
 
 ## Disclaimer
 Scraping retail websites is subject to their Terms of Service. Use this tool responsibly and infrequently.
+
+## Retailer Status
+- **Tesco**: Fully supported.
+- **TK Maxx**: Fully supported.
+- **Asda**: Currently stubbed due to high anti-scraping/Cloudflare protection. Requires browser automation or proxy services for production use.
